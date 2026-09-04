@@ -4193,6 +4193,7 @@ def test_frozen_prefill_matches_reference(flash_kda_device, packed, non_default_
                 output=output,
                 output_final_state=True,
                 seq_order=seq_order,
+                backend="cake",
             )
         stream.synchronize()
     else:
@@ -4201,6 +4202,7 @@ def test_frozen_prefill_matches_reference(flash_kda_device, packed, non_default_
             output=output,
             output_final_state=True,
             seq_order=seq_order,
+            backend="cake",
         )
 
     assert actual_output.data_ptr() == output.data_ptr()
