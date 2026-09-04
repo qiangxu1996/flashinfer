@@ -32,7 +32,9 @@ import torch
 from . import kda_decode as _kda_decode
 from . import kda_prefill as _kda_prefill
 from . import kda_prefill_cute as _kda_prefill_cute
+from . import kda_prefill_cute_small_bh as _kda_prefill_cute_small_bh
 from .api_logging import flashinfer_api
+from .cute_dsl.availability import is_cute_dsl_available
 from .kda_backward import (
     RecurrentKDABackwardWorkspace as RecurrentKDABackwardWorkspace,
 )
@@ -79,7 +81,7 @@ def recurrent_kda(
     checkpoint_cu_starts: Optional[torch.Tensor] = None,
     checkpoint_every_n_tokens: int = 0,
     *,
-    backend: Literal["auto", "cute-dsl", "cake"] = "auto",
+    backend: Literal["auto", "cute-dsl", "cake", "small-bh"] = "auto",
 ) -> (
     tuple[torch.Tensor, Optional[torch.Tensor]]
     | tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]
@@ -239,18 +241,22 @@ def recurrent_kda(
             must be divisible by 32, except that the SM100-family exact-N16
             frozen route also accepts multiples of 16. SGLang normally uses
             64 or a larger cache-page-aligned multiple.
-        backend (Literal["auto", "cute-dsl", "cake"]):
-            Implementation backend. ``"auto"`` selects the architecture-
-            appropriate CuTe DSL kernel for supported ordinary multi-token
-            prefill, including the SM120 backend and SM100-family state
-            checkpoints, and otherwise falls back to an exported frozen Cake
-            specialization.
-            ``"cake"`` and ``"cute-dsl"`` select those backends strictly. The
-            Cake prefill path chooses among direct, persistent, small-BH, and
-            two-stage BT16 schedules from the input shape and physical device.
-            The SM100-family kernel additionally needs
-            ``nvidia-cutlass-dsl>=4.7``; below that ``"auto"`` uses Cake there
-            and ``"cute-dsl"`` raises :class:`ImportError`.
+        backend (Literal["auto", "cute-dsl", "cake", "small-bh"]):
+            Implementation backend. ``"auto"`` selects the bundled small-BH
+            CuTe DSL kernel for eligible SM100-family calls whose logical batch
+            size times head count does not exceed half the device's SM count. It
+            selects other architecture-appropriate CuTe DSL kernels for
+            supported ordinary multi-token prefill, including the SM120
+            backend and SM100-family state checkpoints, and otherwise falls
+            back to an exported frozen Cake specialization.
+            ``"cake"``, ``"small-bh"``, and ``"cute-dsl"`` select those backends
+            strictly. The Cake prefill path chooses among direct, persistent,
+            small-BH, and two-stage BT16 schedules from the input shape and
+            physical device. ``"small-bh"`` selects the small-BH CuTe DSL KDA
+            prefill kernel. The SM100-family CuTe DSL kernels (not including
+            small-BH) additionally need ``nvidia-cutlass-dsl>=4.7``; below that
+            ``"auto"`` uses Cake there and an explicitly selected CuTe backend
+            raises :class:`ImportError`.
 
     Returns:
         Tuple of ``(output, final_state)`` where ``final_state`` is ``None``
@@ -263,10 +269,84 @@ def recurrent_kda(
         prefill_workspace, _kda_prefill.RecurrentKDAPrefillWorkspace
     ):
         raise TypeError("prefill_workspace must be a RecurrentKDAPrefillWorkspace")
-    if backend not in ("auto", "cute-dsl", "cake"):
+    if backend not in ("auto", "cute-dsl", "cake", "small-bh"):
         raise ValueError(
-            f"backend must be 'auto', 'cute-dsl', or 'cake', got {backend!r}"
+            f"backend must be 'auto', 'cute-dsl', 'cake', or 'small-bh', got {backend!r}"
         )
+
+    is_plain_prefill = _kda_prefill._is_plain_multi_token_prefill(
+        q, cu_seqlens, num_spec_tokens
+    )
+    if backend in ("auto", "small-bh"):
+        small_bh_available = (
+            is_cute_dsl_available()
+            if backend == "small-bh" or is_plain_prefill
+            else False
+        )
+        if backend == "small-bh" and not small_bh_available:
+            raise ImportError(
+                "backend='small-bh' requires the optional CuTe DSL runtime; "
+                "install the appropriate FlashInfer CUDA extra"
+            )
+        eligible = (
+            small_bh_available
+            and is_plain_prefill
+            and _kda_prefill_cute_small_bh._is_kda_prefill_cute_small_bh_eligible(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                initial_state=initial_state,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                use_gate_in_kernel=use_gate_in_kernel,
+                lower_bound=lower_bound,
+                cu_seqlens=cu_seqlens,
+                seq_order=seq_order,
+                ssm_state_indices=ssm_state_indices,
+                num_spec_tokens=num_spec_tokens,
+                num_accepted_tokens=num_accepted_tokens,
+                output=output,
+                initial_state_source=initial_state_source,
+                initial_state_indices=initial_state_indices,
+                beta_is_logit=beta_is_logit,
+                state_checkpoints=state_checkpoints,
+                checkpoint_cu_starts=checkpoint_cu_starts,
+                checkpoint_every_n_tokens=checkpoint_every_n_tokens,
+            )
+        )
+        if backend == "small-bh" and not eligible:
+            raise ValueError(
+                "backend='small-bh' does not support this recurrent_kda prefill contract"
+            )
+        use_small_bh = backend == "small-bh"
+        if eligible and backend == "auto":
+            batch_size = q.shape[0] if cu_seqlens is None else cu_seqlens.numel() - 1
+            use_small_bh = (
+                2 * batch_size * q.shape[2]
+                <= torch.cuda.get_device_properties(q.device).multi_processor_count
+            )
+        if eligible and use_small_bh:
+            assert A_log is not None
+            assert dt_bias is not None
+            return _kda_prefill_cute_small_bh._run_kda_prefill_cute_small_bh(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                lower_bound=lower_bound,
+                cu_seqlens=cu_seqlens,
+                output=output,
+                prefill_workspace=prefill_workspace,
+            )
 
     # SM120 is an architecture-specific CuTe DSL implementation. Try it before
     # the SM100-family CuTe DSL path, whose eligibility check rejects SM120.
@@ -333,9 +413,6 @@ def recurrent_kda(
                 **sm120_prefill_kwargs
             )
 
-    is_plain_prefill = _kda_prefill._is_plain_multi_token_prefill(
-        q, cu_seqlens, num_spec_tokens
-    )
     try_cute_dsl_prefill = backend in ("auto", "cute-dsl")
     if try_cute_dsl_prefill and is_plain_prefill:
         cute_dsl_eligible = _kda_prefill_cute._is_cute_dsl_kda_prefill_eligible(
@@ -483,6 +560,8 @@ def recurrent_kda(
     if _kda_decode._run_recurrent_kda is None:
         raise NotImplementedError("recurrent KDA backend is unavailable")
 
+    # An explicit small-BH request either returned or raised in prefill dispatch.
+    assert backend != "small-bh"
     return _kda_decode._run_recurrent_kda(
         q=q,
         k=k,

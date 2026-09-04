@@ -2817,7 +2817,7 @@ def _fake(dtype, shape):
 
 
 def _fake_stride(dtype, shape):
-    stride = tuple(cute.sym_int(divisibility=8) for _ in range(len(shape) - 1))
+    stride = tuple(cute.sym_int() for _ in range(len(shape) - 1))
     stride = stride + (1,)
     return cute.runtime.make_fake_tensor(
         dtype,
@@ -2839,6 +2839,11 @@ def _compile_k1(
 ):
     cu_dtype = _cute_dtype(dtype)
     b, t, tp, nt = (cute.sym_int() for _ in range(4))
+    feature: tuple[object, ...]
+    padded_feature: tuple[object, ...]
+    beta_shape: tuple[object, ...]
+    matrix: tuple[object, ...]
+    gate: tuple[object, ...]
     if is_varlen:
         feature = (t, h, d)
         padded_feature = (tp, h, d)
@@ -2901,6 +2906,11 @@ def _compile_k2(
 ):
     cu_dtype = _cute_dtype(dtype)
     b, bs, t, tp, h, nt = (cute.sym_int() for _ in range(6))
+    feature: tuple[object, ...]
+    value: tuple[object, ...]
+    output: tuple[object, ...]
+    matrix: tuple[object, ...]
+    gate: tuple[object, ...]
     if is_varlen:
         feature = (tp, h, d)
         value = output = (t, h, d)
@@ -2952,6 +2962,8 @@ def chunk_kda_fwd_k1(
     max_active_clusters: int = 152,
 ) -> tuple[torch.Tensor, ...]:
     is_varlen = cu_seqlens is not None
+    matrix_shape: tuple[int, ...]
+    gate_shape: tuple[int, ...]
     if is_varlen:
         t, h, d = q.shape
         b = len(cu_seqlens) - 1
