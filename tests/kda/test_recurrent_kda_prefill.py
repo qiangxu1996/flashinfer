@@ -4143,6 +4143,8 @@ def test_small_bh_prefill_cuda_graph_replay_matches_reference(small_bh_device):
     capture_stream.synchronize()
     graph.replay()
     torch.cuda.synchronize()
+    replay_output = captured_output.clone()
+    replay_state = captured_state.clone()
 
     expected_output, expected_state = _reference(
         {
@@ -4150,14 +4152,23 @@ def test_small_bh_prefill_cuda_graph_replay_matches_reference(small_bh_device):
             "initial_state": initial_state_seed.clone(),
         }
     )
+    inputs["initial_state"].copy_(initial_state_seed)
+    eager_output, eager_state = recurrent_kda(
+        **_strict_prefill_kwargs(inputs),
+        output=torch.empty_like(output),
+        output_final_state=True,
+        backend="small-bh",
+    )
     assert workspace._captured
     assert captured_output.data_ptr() == output.data_ptr()
     assert captured_state is inputs["initial_state"]
+    torch.testing.assert_close(replay_output, eager_output, atol=0, rtol=0)
+    torch.testing.assert_close(replay_state, eager_state, atol=0, rtol=0)
     torch.testing.assert_close(
-        captured_output.float(), expected_output.float(), atol=1e-2, rtol=1e-2
+        replay_output.float(), expected_output.float(), atol=1e-2, rtol=1e-2
     )
     torch.testing.assert_close(
-        captured_state.float(), expected_state.float(), atol=1e-2, rtol=1e-2
+        replay_state.float(), expected_state.float(), atol=1e-2, rtol=1e-2
     )
 
 

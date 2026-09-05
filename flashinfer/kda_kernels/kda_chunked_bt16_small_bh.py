@@ -860,7 +860,7 @@ class ChunkKdaFwdK1:
                         mAlog[h_idx] * RCP_LN2, fastmath=True
                     )
 
-            gate_scale_half = gate_scale * 0.5
+            gate_scale = gate_scale * 0.5 * RCP_LN2
 
             cutlass.pipeline.arrive_and_wait(
                 barrier_id=1, num_threads=self.warpgroup_threads
@@ -907,7 +907,7 @@ class ChunkKdaFwdK1:
                             sKi,
                             tma_consumer,
                             gate_mma_producer,
-                            gate_scale_half,
+                            gate_scale,
                             scale,
                             t_idx,
                             h_idx,
@@ -934,7 +934,7 @@ class ChunkKdaFwdK1:
                             sKi,
                             tma_consumer,
                             gate_mma_producer,
-                            gate_scale_half,
+                            gate_scale,
                             scale,
                             t_idx,
                             h_idx,
@@ -1278,7 +1278,7 @@ class ChunkKdaFwdK1:
         sKi: cute.Tensor,
         tma_consumer: pipeline.PipelineConsumer,
         gate_mma_producer: pipeline.PipelineProducer,
-        gate_scale_half: cutlass.Float32,
+        gate_scale: cutlass.Float32,
         scale: cutlass.Float32,
         t_idx: cutlass.Int32,
         h_idx: cutlass.Int32,
@@ -1427,8 +1427,8 @@ class ChunkKdaFwdK1:
                     tGrG_f32_row[1, c] = tanh(tGrG_f32_row[1, c])
                     tGrG_f32_row[0, c], tGrG_f32_row[1, c] = cute.arch.fma_packed_f32x2(
                         (tGrG_f32_row[0, c], tGrG_f32_row[1, c]),
-                        (gate_scale_half, gate_scale_half),
-                        (gate_scale_half, gate_scale_half),
+                        (gate_scale, gate_scale),
+                        (gate_scale, gate_scale),
                     )
                 else:
                     tGrG_f32_row[0, c], tGrG_f32_row[1, c] = cute.arch.mul_packed_f32x2(
