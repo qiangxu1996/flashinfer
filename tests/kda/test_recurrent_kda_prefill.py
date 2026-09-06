@@ -314,7 +314,19 @@ def _small_bh_run_kwargs(inputs, **overrides):
 
 
 def _mock_small_bh_cuda(monkeypatch):
+    def packed_max_sequence_length(q, cu_seqlens, prefill_workspace):
+        offsets = cu_seqlens.tolist()
+        return max(
+            right - left
+            for left, right in zip(offsets, offsets[1:], strict=False)
+        )
+
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        small_bh_api,
+        "_packed_max_sequence_length",
+        packed_max_sequence_length,
+    )
 
 
 def _mock_small_bh_kernel(monkeypatch, implementation):
@@ -597,10 +609,37 @@ def test_small_bh_packed_runner_uses_flat_abi_and_padded_workspace(
     assert kwargs["output"].data_ptr() == output.data_ptr()
     assert kwargs["cu_seqlens"] is cu_seqlens
     assert kwargs["cu_seqlens"].dtype == torch.int64
+    assert kwargs["max_seqlen"] == 2
     qd, kd, kr, mqk, mkk, gk = kwargs["workspace_tensors"]
     assert qd.shape == kd.shape == kr.shape == (131, 8, 128)
     assert mqk.shape == mkk.shape == (9, 8, 16, 16)
     assert gk.shape == (9, 8, 128)
+
+
+def test_small_bh_packed_max_sequence_length_reuses_warmed_metadata(monkeypatch):
+    workspace = SimpleNamespace(
+        _packed_metadata_lock=threading.Lock(),
+        _packed_metadata_tensor=None,
+        _packed_metadata_signature=None,
+        _packed_metadata=None,
+    )
+    q = torch.empty((1, 6, 8, 128), dtype=torch.bfloat16)
+    cu_seqlens = torch.tensor([0, 1, 2, 6], dtype=torch.int64)
+    monkeypatch.setattr(
+        small_bh_api, "_get_stream_workspace", lambda device: workspace
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    assert small_bh_api._packed_max_sequence_length(q, cu_seqlens, None) == 4
+    warmed_metadata = workspace._packed_metadata
+    assert small_bh_api._packed_max_sequence_length(q, cu_seqlens, None) == 4
+    assert workspace._packed_metadata is warmed_metadata
+
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert small_bh_api._packed_max_sequence_length(q, cu_seqlens, workspace) == 4
+    cu_seqlens.copy_(torch.tensor([0, 3, 4, 6], dtype=torch.int64))
+    with pytest.raises(RuntimeError, match="metadata is not warmed"):
+        small_bh_api._packed_max_sequence_length(q, cu_seqlens, workspace)
 
 
 def test_public_prefill_backend_option_routes_to_cute_dsl(monkeypatch):

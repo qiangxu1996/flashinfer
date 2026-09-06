@@ -172,9 +172,10 @@ def recurrent_kda(
             unchanged offsets tensor to schedule longer sequences first on
             Cake. Eager packed CuTe DSL engine calls also cache a
             longest-sequence-first order; CuTe DSL decomp calls retain the
-            original order because their CTA grid fits in one wave. Eligible
-            148-SM B200 and 152-SM GB200 Cake calls additionally cache
-            persistent worker task bins.
+            original order because their CTA grid fits in one wave. Small-BH
+            prefill caches the maximum sequence length. Eligible
+            148-SM B200 and 152-SM GB200 Cake calls additionally cache persistent
+            worker task bins.
         ssm_state_indices (Optional[torch.Tensor]):
             State cache indices. Shape ``[N]`` int32 for standard decode, or
             ``[N, 1+S]`` int32 for spec decode (``num_spec_tokens`` must also
